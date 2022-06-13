@@ -3,77 +3,56 @@ package service
 import (
 	"database/sql"
 	"errors"
-	"gaston.frassatti/aouth_manager/internal/models"
-	"gaston.frassatti/aouth_manager/internal/repository"
-	"github.com/dghubble/sling"
-	"net/http"
+	"gaston.frassatti/aouth_manager/internal/client"
+	"gaston.frassatti/aouth_manager/internal/handlers"
 	"time"
 )
 
 const dateLayout string = "2006-01-02 15:04:05"
 
-type grantsService struct {
-	dao        repository.Dao
-	httpClient *sling.Sling
-	//Log
+type db interface {
+	GetGrants(uuid string) (grants handlers.Grant, err error)
+	Upsert(grants handlers.Grant)
 }
 
-type requestBody struct {
-	grantType    string `json:"grant_type"`
-	clientId     string `json:"client_id"`
-	clientSecret string `json:"client_secret"`
+type httpClient interface {
+	PostAuthorization(path string, oauthKeys handlers.OauthKeys) client.SuccessResponseBody
 }
 
-type successResponseBody struct {
-	AccessToken string `json:"access_token"`
-	ExpiresDate int    `json:"expires_in"`
-	TokenType   string `json:"token_type"`
+type GrantsService struct {
+	db         db
+	httpClient httpClient
 }
 
-func NewGrantsService(dao repository.Dao, client *sling.Sling) Service {
-	return &grantsService{
-		dao:        dao,
+func NewGrantsService(db db, client httpClient) *GrantsService {
+	return &GrantsService{
+		db:         db,
 		httpClient: client,
 	}
 }
 
-func (s grantsService) ManageGrants(oauthKeys models.OauthKeys) models.Grant {
+func (s GrantsService) ManageGrants(oauthKeys handlers.OauthKeys) handlers.Grant {
 	const pathUrl string = "/mock/api/authorization"
-	grants, err := s.dao.GetGrants(oauthKeys.Uuid)
+	grants, err := s.db.GetGrants(oauthKeys.Uuid)
 
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		//TODO return err and endProcess?
 	}
 
-	response := successResponseBody{}
-
-	if (models.Grant{}) == grants || tokenIsExpired(grants) {
-		res, err := s.httpClient.Post(pathUrl).
-			BodyForm(requestBody{
-				grantType:    "client_credentials",
-				clientId:     oauthKeys.Uuid,
-				clientSecret: oauthKeys.Secret,
-			}).
-			ReceiveSuccess(&response)
-
-		if err != nil {
-			//TODO Log error
-		}
-		if res.StatusCode != http.StatusOK {
-			//TODO Log error
-		}
-
+	if (handlers.Grant{}) == grants || tokenIsExpired(grants) {
+		response := s.httpClient.PostAuthorization(pathUrl, oauthKeys)
+		//TODO Builder
 		grants.Uuid = oauthKeys.Uuid
 		grants.AccessToken = response.AccessToken
 		grants.ExpiresDate = secondsToDate(response.ExpiresDate)
 		grants.TokenType = response.TokenType
 
-		s.dao.Upsert(grants)
+		s.db.Upsert(grants)
 	}
 	return grants
 }
 
-func tokenIsExpired(grants models.Grant) bool {
+func tokenIsExpired(grants handlers.Grant) bool {
 	t, _ := time.Parse(dateLayout, grants.ExpiresDate)
 	return time.Now().After(t)
 }
